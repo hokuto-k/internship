@@ -1,0 +1,7 @@
+layers {
+  name: "loss"
+  type: EUCLIDEAN_LOSS
+  bottom: "ip1"
+  bottom: "label"
+  top: loss"
+}

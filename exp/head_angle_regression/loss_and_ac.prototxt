@@ -1,0 +1,15 @@
+layers {
+  name: "accuracy"
+  type: ACCURACY
+  bottom: "ip1-bmvc"
+  bottom: "label"
+  top: "accuracy"
+  include: { phase: TEST }
+}
+layers {
+  name: "loss"
+  type: EUCLIDEAN_LOSS
+  bottom: "ip1-bmvc"
+  bottom: "label"
+  top: "loss"
+}

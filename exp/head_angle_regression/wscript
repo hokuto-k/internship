@@ -1,0 +1,400 @@
+import maf
+import maflib.util
+import maflib.rules
+import os
+import random
+import mocha.net
+import subprocess
+import shutil
+import Image
+import caffe
+import numpy as np
+import matplotlib.pyplot as plt
+import re
+import json
+import string
+import caffe.proto.caffe_pb2
+import google.protobuf.text_format
+
+def options(opt):
+	pass
+
+def configure(conf):
+	pass
+
+def build(exp): 
+	bmvc_dir = "/home/hokutokagaya/caffe/examples/BMVC2009/"
+	dataset_original = bmvc_dir + "data_original/"
+	dataset_dir = "data_resized2/"
+	dataset_adding_mirrored = "dataset_adding_mirrored/"
+	cifar10_pretrained = "cifar10_full_iter_70000"
+	qmul_model = "qmul_model"
+
+	# Resize
+	exp(source=dataset_original,
+		target=dataset_dir,
+		parameters=[{"resize_size":64}],
+		rule=resize_images()
+		)
+
+	# Data Augmatation
+	exp(source=dataset_dir,
+		target=dataset_adding_mirrored,
+		rule=add_mirrored_file())
+
+
+	# Make datasets available for convert_imageset
+	exp(source=dataset_adding_mirrored,
+		target=["train.txt", "test.txt"],
+		parameters=[{"training_number":2400}],
+		rule=make_lists()
+		)
+
+	# Make datasets available for Caffe
+	exp(source=["train.txt"],
+		target="train_leveldb",
+		rule='GLOG_logtostderr=1 convert_imageset.bin / ${SRC[0].abspath()} ${TGT} 1')
+
+	exp(source=["test.txt"],
+		target="test_leveldb",
+		rule='GLOG_logtostderr=1 convert_imageset.bin / ${SRC[0].abspath()} ${TGT} 1')
+
+	# Compute the mean of images
+	exp(source="train_leveldb",
+		target="mean.binaryproto",
+		rule="compute_image_mean.bin ${SRC} ${TGT}")
+
+	# Make prototxts
+	exp(source="base.prototxt",
+		target="changed_base.prototxt",
+		parameters=maflib.util.product({
+			# "conv1-filtersize":[5],
+			# "conv2-filtersize":[2],
+			# "conv1-num_output":[32],
+			# "conv2-num_output":[32],
+			# "pool1-k_size":[2],
+			# "pool2-k_size":[2],
+			"q":[2]
+			}),
+		rule=change_param())
+
+	# exp(source=["data.prototxt", "changed_base.prototxt", "loss.prototxt"],
+	# 	target="train_base.prototxt",
+	# 	rule="cat ${SRC} > ${TGT}")
+
+	# exp(source=["train_base.prototxt", "train_leveldb", "mean.binaryproto"],
+	# 	target="train.prototxt",
+	# 	rule=mocha.net.configure_data_layer(batchsize=256))
+
+	# exp(source=["data.prototxt", "changed_base.prototxt", "loss_and_ac.prototxt"],
+	# 	target="test_base.prototxt",
+	# 	rule="cat ${SRC} > ${TGT}")
+
+	# exp(source=["test_base.prototxt", "test_leveldb", "mean.binaryproto"],
+	# 	target="test.prototxt",
+	# 	rule=mocha.net.configure_data_layer(batchsize=550))
+
+	exp(source=["data.prototxt", "changed_base.prototxt", "loss_and_ac.prototxt"],
+		target="train_and_test_base.prototxt",
+		rule="cat ${SRC} > ${TGT}")
+
+	exp(source=["train_and_test_base.prototxt", "train_leveldb", "test_leveldb", "mean.binaryproto"],
+		target="train_and_test.prototxt",
+		rule=mocha.net.configure_data_layer(train_batchsize=256, test_batchsize=550))
+
+	# Train nets
+	exp(source='train_and_test.prototxt',
+	            target='solver.prototxt',
+	            parameters=maflib.util.product({
+	                'base_lr': [0.000001],
+	                'momentum': [0.9],
+	                'weight_decay': [0.4],
+	                'lr_policy': ["step"],
+	                'gamma': [0.1],
+	                'stepsize': [6000],
+	                'max_iter': [6000],
+	                'snapshot': [4000],
+	                'solver_mode':[1]
+	                # 'snapshot_prefix': 'bmvc2009'
+	            }),
+	            rule=mocha.net.create_solver(
+	                test_iter=1, test_interval=100, display=100))
+	
+	exp(source=["solver.prototxt", qmul_model],
+		target=["log.txt", "snapshots", 'final_model'],
+		rule=caffe_train())
+
+	# Make prototxt for deploy
+	exp(source=["data_deploy.prototxt", "changed_base.prototxt", "prob.prototxt"],
+		target="deploy.prototxt",
+		rule="cat ${SRC} > ${TGT}")
+
+	# Make mean.binaryproto mean.npy
+	exp(source="mean.binaryproto",
+		target="mean.npy",
+		rule=mean2npy())
+
+	# Compute angular error
+	exp(source=["final_model","deploy.prototxt","test.txt","mean.npy"],
+		target="result.txt",
+		rule=compute_angle_error())
+
+	# exp(source="result.txt",
+	# 	target="resuclt.average",
+	# 	aggregate_by='p',
+	# 	rule=maflib.rules.average)
+
+	# ecp(source="result.txt",
+	# 	target="plot.png",
+	# 	parameter=,
+	# 	rule=my_plot)
+
+@maflib.util.rule
+def add_mirrored_file(task):
+	input_dir = task.inputs[0].abspath()
+	output_dir = task.outputs[0].abspath()
+	try:
+		os.makedirs(output_dir)
+	except:
+		pass
+
+	r = re.compile('-[0-9]+')
+	for root, dirs, files in os.walk(input_dir):
+		for file_ in files:
+			original = Image.open(os.path.join(root, file_))
+			mirror = original.transpose(Image.FLIP_LEFT_RIGHT)
+
+			p = r.search(file_)
+			reverse_angle = str(360 - int(file_[p.start()+1:p.end()])).zfill(3)
+			filename_m = output_dir + '/' + os.path.splitext(file_)[0][0:p.start()+1] + reverse_angle + "m.jpg"
+			print filename_m
+			mirror.save(filename_m)
+			original.save(output_dir+'/'+ file_)
+
+@maflib.util.rule
+def caffe_train(task):
+	output_dir = task.outputs[1].abspath()
+
+	try:
+		os.makedirs(output_dir)
+	except:
+		pass
+
+	f = open(task.inputs[0].abspath(), "r")
+	base_solver = f.read()
+	f.close()
+
+	solver = output_dir + "/solver.prototxt"
+	f = open(solver, "w")
+	f.write(base_solver)
+	f.write("snapshot_prefix: \"%s/\" \n" % output_dir)
+	f.close()
+
+	envs = dict(os.environ)
+	envs["GLOG_logtostderr"] = str(1)
+
+
+	subprocess.check_call(["caffe.bin", "train", "-solver", solver, "-weights", task.inputs[1].abspath()], env=envs,
+		stderr=open(task.outputs[0].abspath(), "w"))
+
+	# subprocess.check_call(["caffe.bin", "train", "-solver", solver], env=envs,
+	# 	stderr=open(task.outputs[0].abspath(), "w"))
+
+	shutil.copyfile(output_dir+'/_iter_4000', task.outputs[2].abspath())
+
+@maflib.util.rule
+def make_lists(task):
+
+	#param
+	pre_file_list = []
+	tr_list = []
+	val_list = []
+	test_list = []
+	num = 0
+
+	path = task.inputs[0].abspath()
+	print path
+	tr = task.parameter["training_number"]
+	
+	for root, dirs, files in os.walk(path):
+		for file_ in files:
+			print file_
+			pre_file_list.append(file_)
+
+	pre_file_list.sort()
+	pre_file_list_tuple = []
+	for i in xrange(len(pre_file_list)/2):
+		print pre_file_list[i]
+		pre_file_list_tuple.append((pre_file_list[i*2], pre_file_list[i*2+1]))
+
+	random.shuffle(pre_file_list_tuple)
+
+	for ftuple in pre_file_list_tuple:
+		for file_ in ftuple:
+			print file_
+			angle = int(file_[9:12])
+			class_num = angle	
+			if num < tr:
+				tr_list.append([os.path.join(path, file_), class_num])
+			else:
+				test_list.append([os.path.join(path, file_), class_num])
+			num += 1	
+
+	f_train = open(task.outputs[0].abspath(), 'w')
+	# f_val = open("val.txt", 'w')
+	f_test = open(task.outputs[1].abspath(), 'w')
+
+	for instance in tr_list:
+		f_train.write(instance[0] + " " + str(instance[1]) + "\n")
+
+	# for instance in val_list:
+	# 	f_val.write(instance[0] + " " + str(instance[1]) + "\n")
+
+	for instance in test_list:
+		f_test.write(instance[0] + " " + str(instance[1]) + "\n")
+
+@maflib.util.rule
+def resize_images(task):
+	i = 0
+	path = task.inputs[0].abspath()
+
+	#指定先ディレクトリがなければ作成
+	dst_dir = task.outputs[0].abspath()
+	if os.path.isdir(dst_dir) == False:
+		os.makedirs(dst_dir)
+
+	size = task.parameter['resize_size']
+	for root, dirs, files in os.walk(path):
+		for file in files:
+			root2, ext = os.path.splitext(file)
+			if ext == '.jpg' or ext == '.JPG' or ext == '.png' or ext == '.PNG':
+				try:
+					img = Image.open(os.path.join(root, file))
+				except:
+					print str(file) + "can't open!"
+					continue
+
+				if img.mode != "RGB":
+					img = img.convert("RGB")
+				img.resize((size, size)).save(dst_dir+"/"+file) 
+
+				#print os.path.join(root, file)
+				i += 1
+				if i % 100 == 0:
+					print str(i) + "now.."
+
+@maflib.util.rule
+def mean2npy(task):
+	blob = caffe.proto.caffe_pb2.BlobProto()
+	data = open( task.inputs[0].abspath() , 'rb' ).read()
+	blob.ParseFromString(data)
+	arr = np.array( caffe.io.blobproto_to_array(blob) )
+	out = arr[0]
+	np.save( task.outputs[0].abspath() , out )
+
+@maflib.util.rule
+def compute_angle_error(task):
+
+	# caffe_root = '../../'  # this file is expected to be in {caffe_root}/examples
+	# bmvc_root = caffe_root + 'examples/BMVC2009/'
+	MODEL_FILE = task.inputs[1].abspath()
+	PRETRAINED = task.inputs[0].abspath()
+
+
+	net = caffe.Classifier(MODEL_FILE, PRETRAINED,
+	                       mean=np.load(task.inputs[3].abspath()),
+	                       channel_swap=(2,1,0),
+	                       raw_scale=255,
+	                       gpu=True,
+	                       image_dims=(32,32))
+
+	f_test = open(task.inputs[2].abspath())
+	test_list = []
+	ans_list = []
+	angle_list = []
+	angle_error = 0
+	num = 0
+	num2 = 0
+
+	html = open('output-result.html', 'w')
+
+	html.write("<html>\n")
+	html.write("<head>\n")
+	html.write('<meta http-equiv="Content-Type" content="text/html; charset=utf8" />\n')
+	html.write("</head>\n")
+	html.write("<body>\n")
+	html.write('<div style="margin:0px;padding:0px;" align="center"><table width="98%" style="border-collapse: collapse;border:1px solid #000000;background-color:#FFFFFF;color:#000000;text-align:left;"><tbody><tr><th style="border:1px solid #000000;background-color:#808080;color:#FFFFFF;text-align:center;">Image</th><th style="border:1px solid #000000;background-color:#808080;color:#FFFFFF;text-align:center;">PREDICT</th><th style="border:1px solid #000000;background-color:#808080;color:#FFFFFF;text-align:center;">GROUND TRUTH</th></tr>')
+
+	r = re.compile('-[0-9]+')
+	for line in f_test:
+		filename = line.split()[0]
+		test_list.append(filename)
+		ans_list.append(int(line.split()[1]))
+		p = r.search(filename)
+		angle_list.append(float(filename[p.start()+1:p.end()]))
+
+	for IMAGE_FILE in test_list:
+		input_image = caffe.io.load_image(IMAGE_FILE)
+		imagename = os.path.basename(IMAGE_FILE)
+		prediction = net.predict([input_image], oversample=False)
+		predict_angle = float(prediction[0])
+		# print predict_angle
+		if predict_angle < 0:
+			predict_angle += 360
+
+		ae1 = abs(predict_angle - angle_list[test_list.index(IMAGE_FILE)])
+
+		if ae1 < 180:
+			angle_error += ae1
+		else:
+			angle_error += 360 - ae1 
+
+		if ae1 < 30:
+			num += 1
+		elif ae1 > 150:
+			num2 += 1
+
+		html.write('<tr><td style="border:1px solid #000000;text-align:center;"><img src="http://10.0.0.33/~hokutokagaya/bmvc_head/resized/{}"></td><td style="border:1px solid #000000;text-align:center;">{}</td><td style="border:1px solid #000000;text-align:center;">{}</td><td style="border:1px solid #000000;text-align:center;">{}</tr>'.format(imagename, str(predict_angle), str(angle_list[test_list.index(IMAGE_FILE)]), str(ae1)))
+
+
+
+
+	angle_error = angle_error / float(len(test_list))
+
+
+	out = open(task.outputs[0].abspath(), 'w')
+	out.write(json.dumps({'Mean Angle Error':angle_error, '< 30 (in 550)':num, '> 150 (in 550)':num2}, sort_keys=True, indent=4))
+	# print "accuracy:", float(num) / len(test_list)
+	# print "angle error 1 (simple way):", angle_error1 
+	# print "angle error 2 (weighted average):", angle_error2
+
+@maflib.plot.plot_by
+def my_plot(figure, data, parameter):
+    # キー 'a', 'b' に対応するリストを取り出す
+    x, y = data.get_data_2d('a', 'b')
+
+    # これをプロット
+    axes = figure.add_subplot(111)
+    axes.plot(x, y)
+
+
+@maflib.util.rule
+def change_param(task):
+	net_str = task.inputs[0].read()
+	net = caffe.proto.caffe_pb2.NetParameter()
+	google.protobuf.text_format.Merge(net_str, net)
+
+	for layer in net.layers:
+		if layer.name == 'pool1':
+			# print layer
+			layer_p1 = layer
+		elif layer.name == 'pool2':
+			layer_p2 = layer
+
+	# layer_p1.pooling_param.kernel_size = task.parameter["pool1-k_size"]
+	# layer_p2.pooling_param.kernel_size = task.parameter["pool2-k_size"]
+	result = google.protobuf.text_format.MessageToString(net)
+	task.outputs[0].write(result)
+
+
+

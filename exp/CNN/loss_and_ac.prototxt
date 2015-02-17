@@ -1,0 +1,13 @@
+layers {
+  name: "prob"
+  type: SOFTMAX
+  bottom: "ip1"
+  top: "prob"
+}
+layers {
+  name: "accuracy"
+  type: ACCURACY
+  bottom: "prob"
+  bottom: "label"
+  top: "accuracy"
+}

@@ -1,0 +1,18 @@
+layers {
+  name: "bmvc-data"
+  type: DATA
+  top: "bmvc-data"
+  top: "label"
+  data_param {
+  }
+  include: { phase: TRAIN }
+}
+layers {
+  name: "bmvc-data"
+  type: DATA
+  top: "bmvc-data"
+  top: "label"
+  data_param {
+  }
+  include: { phase: TEST }
+}

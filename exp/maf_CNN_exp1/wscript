@@ -1,0 +1,295 @@
+import maf
+import maflib.util
+import os
+import random
+import mocha.net
+import subprocess
+import shutil
+import Image
+import caffe
+import numpy as np
+import matplotlib.pyplot as plt
+import re
+import json
+
+def options(opt):
+	pass
+
+def configure(conf):
+	pass
+
+def build(exp): 
+	bmvc_dir = "/home/hokutokagaya/caffe/examples/BMVC2009/"
+	dataset_original = bmvc_dir + "data_original/"
+	dataset_dir = "data_resized2/"
+
+	# Resize
+	exp(source=dataset_original,
+		target=dataset_dir,
+		parameters=[{"resize_size":32}],
+		rule=resize_images()
+		)
+
+	# Data Augmatation
+	exp(source=dataset_dir,
+		target=[],
+		rule=add_mirrored_file())
+
+
+	# Make datasets available for convert_imageset
+	exp(source=dataset_dir,
+		target=["train.txt", "test.txt"],
+		parameters=[{"training_number":1200}],
+		rule=make_lists()
+		)
+
+	# Make datasets available for Caffe
+	exp(source=["train.txt"],
+		target="train_leveldb",
+		rule='GLOG_logtostderr=1 convert_imageset.bin / ${SRC[0].abspath()} ${TGT} 1')
+
+	exp(source=["test.txt"],
+		target="test_leveldb",
+		rule='GLOG_logtostderr=1 convert_imageset.bin / ${SRC[0].abspath()} ${TGT} 1')
+
+	# Compute the mean of images
+	exp(source="train_leveldb",
+		target="mean.binaryproto",
+		rule="compute_image_mean.bin ${SRC} ${TGT}")
+
+	# Make prototxts
+	exp(source=["data.prototxt", "base.prototxt", "loss.prototxt"],
+		target="train_base.prototxt",
+		rule="cat ${SRC} > ${TGT}")
+
+	exp(source=["train_base.prototxt", "train_leveldb", "mean.binaryproto"],
+		target="train.prototxt",
+		rule=mocha.net.configure_data_layer(batchsize=256))
+
+	exp(source=["data.prototxt", "base.prototxt", "loss_and_ac.prototxt"],
+		target="test_base.prototxt",
+		rule="cat ${SRC} > ${TGT}")
+
+	exp(source=["test_base.prototxt", "test_leveldb", "mean.binaryproto"],
+		target="test.prototxt",
+		rule=mocha.net.configure_data_layer(batchsize=275))
+
+	# Train nets
+	exp(source='train.prototxt test.prototxt',
+	            target='solver.prototxt',
+	            parameters=maflib.util.product({
+	                'base_lr': [0.001, 0.01, 0.1],
+	                'momentum': [0.1, 0.3, 0.5, 0.9],
+	                'weight_decay': [0.004, 0.04, 0.4],
+	                'lr_policy': ["step"],
+	                'gamma': [0.1],
+	                'stepsize': [2000],
+	                'max_iter': [5000],
+	                'snapshot': [5000],
+	                # 'snapshot_prefix': 'bmvc2009'
+	            }),
+	            rule=mocha.net.create_solver(
+	                test_iter=1, test_interval=1000, display=1000))
+	
+	exp(source="solver.prototxt",
+		target=["log.txt", "snapshots", 'final_model'],
+		rule=caffe_train())
+
+	# Make prototxt for deploy
+	exp(source=["data_deploy.prototxt", "base.prototxt", "prob.prototxt"],
+		target="deploy.prototxt",
+		rule="cat ${SRC} > ${TGT}")
+
+	# Make mean.binaryproto mean.npy
+	exp(source="mean.binaryproto",
+		target="mean.npy",
+		rule=mean2npy())
+
+	# Compute angular error
+	exp(source=["final_model","deploy.prototxt","test.txt","mean.npy"],
+		target="result.txt",]
+		rule=compute_angle_error())
+
+	# ecp(source="result.txt",
+	# 	target="plot.png",
+	# 	parameter=,
+	# 	rule=my_plot)
+
+
+@maflib.util.rule
+def caffe_train(task):
+	output_dir = task.outputs[1].abspath()
+
+	try:
+		os.makedirs(output_dir)
+	except:
+		pass
+
+	f = open(task.inputs[0].abspath(), "r")
+	base_solver = f.read()
+	f.close()
+
+	solver = output_dir + "/solver.prototxt"
+	f = open(solver, "w")
+	f.write(base_solver)
+	f.write("snapshot_prefix: \"%s/\" \n" % output_dir)
+	f.close()
+
+	envs = dict(os.environ)
+	envs["GLOG_logtostderr"] = str(1)
+
+
+	subprocess.check_call(["/home/hokutokagaya/caffe/distribute/bin/train_net.bin", solver], env=envs,
+		stderr=open(task.outputs[0].abspath(), "w"))
+
+	shutil.copyfile(output_dir+'/_iter_5000', task.outputs[2].abspath())
+
+@maflib.util.rule
+def make_lists(task):
+
+	#param
+	pre_file_list = []
+	tr_list = []
+	val_list = []
+	test_list = []
+	num = 0
+
+	path = task.inputs[0].abspath()
+	tr = task.parameter["training_number"]
+	
+	for root, dirs, files in os.walk(path):
+		for file_ in files:
+			pre_file_list.append(file_)
+
+	random.shuffle(pre_file_list)
+
+	for file_ in pre_file_list:
+		print file_
+		angle = int(file_[9:12])
+		class_num = angle / 45	
+		if num < tr:
+			tr_list.append([os.path.join(path, file_), class_num])
+		else:
+			test_list.append([os.path.join(path, file_), class_num])
+		num += 1	
+
+	f_train = open(task.outputs[0].abspath(), 'w')
+	# f_val = open("val.txt", 'w')
+	f_test = open(task.outputs[1].abspath(), 'w')
+
+	for instance in tr_list:
+		f_train.write(instance[0] + " " + str(instance[1]) + "\n")
+
+	# for instance in val_list:
+	# 	f_val.write(instance[0] + " " + str(instance[1]) + "\n")
+
+	for instance in test_list:
+		f_test.write(instance[0] + " " + str(instance[1]) + "\n")
+
+@maflib.util.rule
+def resize_images(task):
+	i = 0
+	path = task.inputs[0].abspath()
+
+	#指定先ディレクトリがなければ作成
+	dst_dir = task.outputs[0].abspath()
+	if os.path.isdir(dst_dir) == False:
+		os.makedirs(dst_dir)
+
+	size = task.parameter['resize_size']
+	for root, dirs, files in os.walk(path):
+		for file in files:
+			root2, ext = os.path.splitext(file)
+			if ext == '.jpg' or ext == '.JPG' or ext == '.png' or ext == '.PNG':
+				try:
+					img = Image.open(os.path.join(root, file))
+				except:
+					print str(file) + "can't open!"
+					continue
+
+				if img.mode != "RGB":
+					img = img.convert("RGB")
+				img.resize((size, size)).save(dst_dir+"/"+file) 
+
+				#print os.path.join(root, file)
+				i += 1
+				if i % 100 == 0:
+					print str(i) + "now.."
+
+@maflib.util.rule
+def mean2npy(task):
+	blob = caffe.proto.caffe_pb2.BlobProto()
+	data = open( task.inputs[0].abspath() , 'rb' ).read()
+	blob.ParseFromString(data)
+	arr = np.array( caffe.io.blobproto_to_array(blob) )
+	out = arr[0]
+	np.save( task.outputs[0].abspath() , out )
+
+@maflib.util.rule
+def compute_angle_error(task):
+
+	# caffe_root = '../../'  # this file is expected to be in {caffe_root}/examples
+	# bmvc_root = caffe_root + 'examples/BMVC2009/'
+	MODEL_FILE = task.inputs[1].abspath()
+	PRETRAINED = task.inputs[0].abspath()
+
+
+	net = caffe.Classifier(MODEL_FILE, PRETRAINED,
+	                       mean_file=task.inputs[3].abspath(),
+	                       channel_swap=(2,1,0),
+	                       input_scale=255,
+	                       gpu=True)
+
+	f_test = open(task.inputs[2].abspath())
+	test_list = []
+	ans_list = []
+	angle_list = []
+	num = 0
+	angle_error1 = 0
+	angle_error2 = 0
+
+
+	r = re.compile('-[0-9]+')
+	for line in f_test:
+		filename = line.split()[0]
+		test_list.append(filename)
+		ans_list.append(int(line.split()[1]))
+		p = r.search(filename)
+		angle_list.append(float(filename[p.start()+1:p.end()]))
+
+	for IMAGE_FILE in test_list:
+		input_image = caffe.io.load_image(IMAGE_FILE)
+		prediction = net.predict([input_image], oversample=False)
+		predict_class = np.argmax(prediction[0])
+		predict_angle1 = predict_class * 45.0 + 22.5
+		predict_angle2 = 0
+		for i in range(8):
+			predict_angle2 += prediction[0][i] * (i * 45.0 + 22.5) 
+
+		if ans_list[test_list.index(IMAGE_FILE)] == predict_class:
+			# print "Correct!"
+			num += 1
+		else:
+			# print "Wrong!"
+			pass		
+
+		angle_error1 += abs(predict_angle1 - angle_list[test_list.index(IMAGE_FILE)])
+		angle_error2 += abs(predict_angle2 - angle_list[test_list.index(IMAGE_FILE)])
+
+	angle_error1 = angle_error1 / float(len(test_list))
+	angle_error2 = angle_error2 / float(len(test_list))
+
+	out = open(task.outputs[0].abspath(), 'w')
+	out.write(json.dumps({'accuracy':float(num) / len(test_list), 'angle error 1':angle_error1, 'angle error 2':angle_error2}, sort_keys=True, indent=4))
+	# print "accuracy:", float(num) / len(test_list)
+	# print "angle error 1 (simple way):", angle_error1 
+	# print "angle error 2 (weighted average):", angle_error2
+
+@maflib.plot.plot_by
+def my_plot(figure, data, parameter):
+    # キー 'a', 'b' に対応するリストを取り出す
+    x, y = data.get_data_2d('a', 'b')
+
+    # これをプロット
+    axes = figure.add_subplot(111)
+    axes.plot(x, y)

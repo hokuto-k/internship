@@ -1,0 +1,263 @@
+import maf
+import maflib.util
+import maflib.rules
+import os
+import random
+import subprocess
+import shutil
+import Image
+import caffe
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+import sys
+import csv
+import os
+
+
+def options(opt):
+	pass
+
+def configure(conf):
+	pass
+
+def build(exp): 
+	head_mean_npy = 'mean.npy'
+	head_model = 'qmul_head_detect_deploy'
+	head_pretrained = 'qmul_head_detect'
+	body_mean_npy = 'umean.npy'
+	body_model = 'upperbody_detect_deploy'
+	body_pretrained = 'upperbody_detect'
+	video_file = 'TownCentreXVID.avi'
+	annotation_file = 'TownCentre-groundtruth.top'
+
+	# Make dataset
+	exp(source=[video_file, annotation_file],
+		target='dataset_dir',
+		parameters=[{"num_person":10}],
+		rule=make_dataset()
+		)
+
+	# experiment
+	# exp(source=[head_mean_npy, head_model, head_pretrained, ubody_mean_npy, body_model, body_pretrained, 'dataset_dir'],
+	# 	target=['result_image'],
+	# 	rule=detect_head()
+	# 	)
+
+	# # convert result to movie
+	# exp(source=['result_image'],
+	# 	target=['result_video'],
+	# 	rule=make_video())
+
+
+
+@maflib.util.rule
+def make_dataset(task):
+	# cv2.cv.CV_CAP_PROP_FRAME_WIDTH
+	cap = cv2.VideoCapture(task.inputs[0].abspath())
+
+	top_file = task.inputs[1].abspath()
+	top = open(top_file, 'rb')
+	reader = csv.reader(top)
+
+	top_csv = []
+
+	for row in reader:
+		top_csv.append(row)
+
+	top_csv_by_frame = [[] for i in xrange(4500)]
+
+	for row in top_csv:
+		top_csv_by_frame[int(row[1])-1].append(row)
+
+	target_max = int(sys.argv[2])
+
+	while cap.isOpened():
+		# Capture frame-by-frame
+		ret, frame = cap.read()
+		# print a, cap.get(4), cap.get(3)
+		# print frame.shape
+
+		curpos = int(cap.get(cv2.cv.CV_CAP_PROP_POS_FRAMES))
+		print curpos
+
+		nowframe = curpos - 1
+		for target in top_csv_by_frame[nowframe]:
+			if int(target[0]) > target_max:
+				continue
+
+			dst_dir = task.outputs[0] + target[0]
+			if os.path.isdir(dst_dir) == False:
+				os.mkdir(dst_dir)
+
+			dst = frame[int(float(target[9])):int(float(target[11])), int(float(target[8])):int(float(target[10]))]
+			cv2.imwrite(dst_dir+"/"+str(curpos).zfill(4)+".jpg", dst)
+		
+		# cv2.imshow('frame',frame)
+
+	# When everything done, release the capture
+	cap.release()
+
+
+
+@maflib.util.rule
+def detect_head(task):
+	image_dir = 
+	MODEL_FILE = 'qmul_head_detect_deploy'
+	PRETRAINED = 'qmul_head_detect'
+
+	net = caffe.Classifier(MODEL_FILE, PRETRAINED,
+	                       mean=np.load('mean.npy'),
+	                       image_dims=(32,32),
+	                       raw_scale=255,
+	                       gpu=True)
+
+	net.set_phase_test()
+	net.set_mode_gpu()
+
+	DETECT_WINDOW_SIZE = [40, 35, 30, 25, 20]
+	
+	results = []
+	images = []
+
+	for root, dirs, files in os.walk(image_dir):
+		for file_ in files:
+			filename = os.path.join(root, file_)
+			images.append(filename)
+
+	images.sort()
+
+	for filename in images:
+		time1 = time.clock()
+		print 'Now, {}'.format(filename)
+		
+		image = cv2.imread(filename)
+
+		if image.shape[0] == 0 or image == None:
+			print 'invalid file'
+			continue
+
+		target_queue = []
+		target_info_queue = []
+
+		target_result_history = np.array([[0,0]])
+		target_info_history = []
+
+		height, width = image.shape[:2]
+
+		# Region for sliding windows
+		height_search_start = 0
+		width_search_start = int(width / 4)
+
+		max_conf = -10.0
+		detected_face = None
+
+		for size in DETECT_WINDOW_SIZE:
+			height_search_end = height / 3 - size
+			width_search_end = width * 3 / 4 - size
+			for j in xrange(height_search_start, height_search_end, 3):
+				for i in xrange(width_search_start, width_search_end, 3):
+					
+					target_ = image[j:j+size, i:i+size]
+
+					target = skimage.img_as_float(target_).astype(np.float32)
+					target_queue.append(target)
+					target_info_queue.append([i, j, size])
+					target_info_history.append([i, j, size])
+
+					# prediction = net.predict([target], oversample=False)
+
+					# if prediction[0][1] > max_conf:
+					# 	detected_face = {"x":i, "y":j, "size":size}
+					# 	max_conf = prediction[0][1]
+
+					if len(target_queue) == 1000:
+						prediction = net.predict(target_queue, oversample=False)
+						# print type(prediction), prediction[:,1].max()
+						local_max = prediction[:,1].max()
+						local_max_idx = prediction[:,1].argmax()
+
+						if local_max > max_conf:
+							mi, mj, msize = target_info_queue[local_max_idx]
+							detected_face = {"x":mi, "y":mj, "size":msize, "conf":local_max}
+							max_conf = local_max
+
+
+			# print detected_face
+
+
+		if len(target_queue) != 0:
+			prediction = net.predict(target_queue, oversample=False)
+			# print type(prediction), prediction[:,1].max()
+			local_max = prediction[:len(target_queue),1].max()
+			local_max_idx = prediction[:len(target_queue),1].argmax()
+
+			if local_max > max_conf:
+				mi, mj, msize = target_info_queue[local_max_idx]
+				detected_face = {"x":mi, "y":mj, "size":msize, "conf":local_max}
+				max_conf = local_max
+
+			target_result_history = np.vstack((target_result_history, prediction))
+
+			target_queue = []
+			target_info_queue = []
+
+
+		
+		image2 = image + 0
+
+		target_result_history = target_result_history[1:, 1]
+		rank = np.argsort(target_result_history)
+
+		target_info_history = np.array(target_info_history)
+
+
+		# Green indicates MAX i, j, size
+		min_i = 10000
+		min_j = 10000
+		max_size = 0
+		for i in xrange(1, 6):
+			info = target_info_history[rank[-i]]
+			# print info
+			if info[0] < min_i:
+				min_i = info[0]
+			if info[1] < min_j:
+				min_j = info[1]
+			if info[2] > max_size:
+				max_size = info[2]
+			
+		# print (min_i, min_j), (min_i+max_size, min_j+max_size)
+		cv2.rectangle(image2, (min_i, min_j), (min_i+max_size, min_j+max_size), (0, 255, 0))	
+
+		# # Red indicate AVG
+		# mean = np.array([0.0, 0.0, 0.0])
+		# for i in xrange(1, 6):
+		# 	mean = mean + np.array(target_info_history[rank[-i]]) / 5.0
+			
+		# mean = mean.astype(np.int64)
+
+		# # print (mean[0], mean[1]), (mean[0]+mean[2], mean[1]+mean[2])
+		# cv2.rectangle(image2, (mean[0], mean[1]), (mean[0]+mean[2], mean[1]+mean[2]), (0, 0, 255))			
+
+		# # Blue indicate MAX
+		# # print (detected_face['x'], detected_face['y']), (detected_face['x']+detected_face['size'], detected_face['y']+detected_face['size'])
+		# cv2.rectangle(image2, (detected_face['x'], detected_face['y']), (detected_face['x']+detected_face['size'], detected_face['y']+detected_face['size']), (255, 0, 0))
+
+		image2 = cv2.resize(image2, (100, 200))
+		cv2.imwrite('{}r/test_{}_{}.jpg'.format(image_dir, image_dir, os.path.splitext(os.path.basename(filename))[0]), image2)
+		results.append(cv2.resize(image2, (50, 120)))
+
+		time2 = time.clock()
+
+		print "Now computing time : {} sec".format(str(int(time2-time1)))
+		
+
+	rs = cv2.hconcat(results)
+
+	cv2.imwrite("result_{}.jpg".format(image_dir), rs)
+
+
+
+
+
+

@@ -1,0 +1,8 @@
+layers {
+  name: "bmvc"
+  type: DATA
+  top: "data"
+  top: "label"
+  data_param {
+  }
+}

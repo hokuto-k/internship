@@ -1,0 +1,16 @@
+I0806 15:46:53.521497 10138 train_net.cpp:26] Starting Optimization
+I0806 15:46:53.521595 10138 solver.cpp:41] Creating training net.
+F0806 15:46:53.521625 10138 io.cpp:38] Check failed: fd != -1 (-1 vs. -1) File not found: bmvc2009_full_train.prototxt
+*** Check failure stack trace: ***
+    @     0x7f21f86f696d  google::LogMessage::Fail()
+    @     0x7f21f86f8733  google::LogMessage::SendToLog()
+    @     0x7f21f86f6588  google::LogMessage::Flush()
+    @     0x7f21f86f8f8e  google::LogMessageFatal::~LogMessageFatal()
+    @           0x436604  caffe::ReadProtoFromTextFile()
+    @           0x459c59  caffe::ReadNetParamsFromTextFileOrDie()
+    @           0x451cc8  caffe::Net<>::Net()
+    @           0x43e3de  caffe::Solver<>::Init()
+    @           0x43e8ba  caffe::Solver<>::Solver()
+    @           0x41367f  main
+    @     0x7f21f5b40ead  (unknown)
+    @           0x415409  (unknown)
